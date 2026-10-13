@@ -7,11 +7,12 @@
 
 В GitHub откройте **Releases → Draft a new release**, создайте новый тег (например,
 `v1.0.0-filebeat`) на ветке `master` с текущими изменениями и нажмите **Publish release**.
-Workflow **Windows release** проверит экспортер, соберёт автономную Windows x64-версию
+Workflow **Windows release** проверит экспортер, соберёт компактную Windows x64-версию
 и добавит `EventLogExporter-win-x64.zip` в **Assets** этого релиза. Перед первой
 публикацией в fork при необходимости включите GitHub Actions во вкладке **Actions**.
 ZIP появится после успешного завершения workflow, а не сразу при создании релиза.
-Переустановка SDK или runtime на сервере не требуется — runtime уже включён в архив.
+SDK на сервере не требуется. Runtime в ZIP не включён: на сервере должен быть установлен
+**Microsoft.NETCore.App 5.0.17 x64**. Проверка: `dotnet --list-runtimes`.
 Отправка нового тега `v*` также запускает сборку и автоматически публикует релиз с ZIP.
 
 Сборку можно запустить и без релиза: **Actions → Windows release → Run workflow**.

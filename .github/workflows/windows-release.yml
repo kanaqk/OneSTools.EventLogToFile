@@ -20,15 +20,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '10.0.x'
+          dotnet-version: |
+            5.0.x
+            10.0.x
       - name: Test exporter
         shell: pwsh
         run: dotnet run --project tests/Exporter.SmokeTests --configuration Release
-      - name: Publish self-contained Windows x64 application
+      - name: Publish compact Windows x64 application
         shell: pwsh
         run: >-
           dotnet publish OneSTools.EventLog.Exporter/OneSTools.EventLog.Exporter.csproj
-          --configuration Release --runtime win-x64 --self-contained true
+          --configuration Release --runtime win-x64 --self-contained false
           -p:PublishSingleFile=false --output artifacts/windows/EventLogExporter-win-x64
           -m:1
       - name: Test published Windows executable
@@ -59,6 +61,11 @@ jobs:
         shell: pwsh
         run: |
           $publish = 'artifacts/windows/EventLogExporter-win-x64'
+          if (Test-Path "$publish/coreclr.dll") { throw 'Runtime must not be included in the compact ZIP' }
+          $config = Get-Content "$publish/EventLogExporter.runtimeconfig.json" -Raw | ConvertFrom-Json
+          if ($config.runtimeOptions.framework.name -ne 'Microsoft.NETCore.App') {
+            throw 'Compact application must use the installed .NET runtime'
+          }
           Remove-Item "$publish/appsettings.Development.json" -ErrorAction SilentlyContinue
           Copy-Item examples/RUN-WINDOWS.md "$publish/RUN-WINDOWS.md"
           Copy-Item examples/filebeat.yml "$publish/filebeat.example.yml"
@@ -88,6 +95,6 @@ jobs:
           if ($LASTEXITCODE -eq 0) {
             gh release upload $env:RELEASE_TAG artifacts/windows/EventLogExporter-win-x64.zip --clobber
           } else {
-            gh release create $env:RELEASE_TAG artifacts/windows/EventLogExporter-win-x64.zip --verify-tag --title "EventLogExporter $env:RELEASE_TAG" --notes 'Windows x64 ZIP with bundled runtime. Extract the entire archive, configure appsettings.json and run EventLogExporter.exe. See RUN-WINDOWS.md inside the archive.'
+            gh release create $env:RELEASE_TAG artifacts/windows/EventLogExporter-win-x64.zip --verify-tag --title "EventLogExporter $env:RELEASE_TAG" --notes 'Compact Windows x64 ZIP without bundled runtime. Requires installed Microsoft.NETCore.App 5.0.17 x64. Extract the entire archive, configure appsettings.json and run EventLogExporter.exe. See RUN-WINDOWS.md inside the archive.'
           }
           if ($LASTEXITCODE -ne 0) { throw 'GitHub release publication failed' }
