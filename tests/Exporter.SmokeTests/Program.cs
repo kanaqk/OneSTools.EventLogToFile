@@ -23,10 +23,10 @@ try
         await storage.WriteEventLogDataAsync(new List<EventLogItem> { first });
         using var filebeatReader = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
         Check(filebeatReader.Length > 0, "output is flushed and readable while exporter runs");
-        Check(File.ReadAllLines(path).Length == 1, "multiline comments stay on one JSON line");
-        var bytes = File.ReadAllBytes(path);
+        Check(ReadLines(path).Length == 1, "multiline comments stay on one JSON line");
+        var bytes = ReadBytes(path);
         Check(bytes[0] == '{' && bytes[^1] == '\n', "UTF-8 without BOM with final newline");
-        var roundtrip = JsonSerializer.Deserialize<EventLogItem>(File.ReadAllLines(path)[0]);
+        var roundtrip = JsonSerializer.Deserialize<EventLogItem>(ReadLines(path)[0]);
         Check(roundtrip.Comment == first.Comment && roundtrip.Data == first.Data && roundtrip.User == first.User,
             "Cyrillic, quotes, backslashes and newlines roundtrip");
         Check(roundtrip.DateTime == first.DateTime && roundtrip.DateTime.Kind == DateTimeKind.Utc,
@@ -38,7 +38,7 @@ try
         var position = await storage.ReadEventLogPositionAsync();
         Check(position.Id == 1 && position.EndPosition == 100 && position.LgfEndPosition == 50,
             "restart recovers last complete event across buffer boundaries");
-        Check(File.ReadAllLines(path).Length == 1 && File.ReadAllBytes(path)[^1] == '\n',
+        Check(ReadLines(path).Length == 1 && ReadBytes(path)[^1] == '\n',
             "restart removes incomplete tail");
         await storage.WriteEventLogDataAsync(new List<EventLogItem>
         {
@@ -50,7 +50,7 @@ try
             await storage.WriteEventLogDataAsync(new List<EventLogItem> { first }, cancellation.Token));
     }
     using (var storage = new JsonFileStorage(path))
-        Check((await storage.ReadEventLogPositionAsync()).Id == 2 && File.ReadAllLines(path).Length == 2,
+        Check((await storage.ReadEventLogPositionAsync()).Id == 2 && ReadLines(path).Length == 2,
             "append preserves prior events and cancellation adds none");
 
     var broken = Path.Combine(root, "broken.jsonl");
@@ -73,8 +73,8 @@ try
     using (var storage = new JsonFileStorage(archivePath))
     using (var exporter = new EventLogExporter(settings, storage))
         await exporter.StartAsync().WaitAsync(TimeSpan.FromSeconds(10));
-    Check(File.ReadAllLines(archivePath).Length == 2, "archive completion drains an incomplete batch");
-    var archived = JsonSerializer.Deserialize<EventLogItem>(File.ReadAllLines(archivePath)[0]);
+    Check(ReadLines(archivePath).Length == 2, "archive completion drains an incomplete batch");
+    var archived = JsonSerializer.Deserialize<EventLogItem>(ReadLines(archivePath)[0]);
     Check(archived.Comment == "Тест" && archived.Event == "Сеанс.Начало" && archived.DateTime == first.DateTime,
         "LGF/LGP conversion resolves event names and converts timezone to UTC");
 
@@ -86,7 +86,7 @@ try
     using (var exporter = new EventLogExporter(settings, storage))
     using (var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(500)))
         await Task.Run(() => exporter.StartAsync(cancellation.Token)).WaitAsync(TimeSpan.FromSeconds(10));
-    var lines = File.ReadAllLines(archivePath);
+    var lines = ReadLines(archivePath);
     Check(lines.Length == 3 && JsonSerializer.Deserialize<EventLogItem>(lines[2]).Id == 3,
         "live restart skips exported events and shutdown drains the final batch");
 
@@ -119,6 +119,18 @@ finally
 {
     Directory.Delete(root, true);
 }
+
+// Windows readers must allow the exporter's existing write handle, just as Filebeat does.
+static byte[] ReadBytes(string path)
+{
+    using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+    using var output = new MemoryStream();
+    stream.CopyTo(output);
+    return output.ToArray();
+}
+
+static string[] ReadLines(string path) =>
+    Encoding.UTF8.GetString(ReadBytes(path)).Split('\n', StringSplitOptions.RemoveEmptyEntries);
 
 static void Check(bool condition, string name)
 {
