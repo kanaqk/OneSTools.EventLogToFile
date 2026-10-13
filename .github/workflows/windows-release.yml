@@ -41,20 +41,27 @@ jobs:
           Set-Content -Path (Join-Path $source '1Cv8.lgf') -Encoding utf8 -Value '{4,"_$Session$_.Start",1}'
           $record = '{20261013121500,N,{0,0},0,0,0,1,1,I,"Test",0,{U},"",0,0,0,1}'
           Set-Content -Path (Join-Path $source '20261013000000.lgp') -Encoding utf8 -Value @($record, $record)
-          $output = Join-Path $env:RUNNER_TEMP 'eventlog-release-events.jsonl'
+          Set-Content -Path (Join-Path $source '20261014000000.lgp') -Encoding utf8 -Value $record
+          [IO.File]::SetLastWriteTimeUtc((Join-Path $source '20261013000000.lgp'), [DateTime]::UtcNow.AddMinutes(-2))
+          [IO.File]::SetLastWriteTimeUtc((Join-Path $source '20261014000000.lgp'), [DateTime]::UtcNow.AddMinutes(-1))
+          $output = Join-Path $env:RUNNER_TEMP 'eventlog-release-output'
           $exe = Join-Path $PWD 'artifacts/windows/EventLogExporter-win-x64/EventLogExporter.exe'
           $arguments = @('--Exporter:StorageType=JsonFile', '--Exporter:LoadArchive=true',
             '--Exporter:WritingMaxDegreeOfParallelism=1', '--Exporter:TimeZone=Asia/Yekaterinburg',
-            "--Exporter:LogFolder=`"$source`"", "--JsonFile:Path=`"$output`"")
+            "--Exporter:LogFolder=`"$source`"", "--JsonFile:Folder=`"$output`"")
           $process = Start-Process -FilePath $exe -ArgumentList $arguments -NoNewWindow -PassThru
           if (-not $process.WaitForExit(30000)) {
             $process.Kill()
             throw 'Published exporter did not finish archive conversion'
           }
           if ($process.ExitCode -ne 0) { throw "Exporter exit code: $($process.ExitCode)" }
-          $events = @(Get-Content $output | ForEach-Object { $_ | ConvertFrom-Json })
+          $files = @(Get-ChildItem $output -Filter '*.jsonl' | Sort-Object Name)
+          if ($files.Count -ne 2 -or $files[0].Name -ne '20261013000000.jsonl' -or $files[1].Name -ne '20261014000000.jsonl') {
+            throw 'Published exporter must create a JSON file for each LGP'
+          }
+          $events = @($files | ForEach-Object { Get-Content $_.FullName } | ForEach-Object { $_ | ConvertFrom-Json })
           $timestamp = [DateTimeOffset]$events[0].DateTime
-          if ($events.Count -ne 2 -or $events[1].Id -ne 2 -or $timestamp.UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ssZ') -ne '2026-10-13T07:15:00Z') {
+          if ($events.Count -ne 3 -or $events[2].Id -ne 3 -or $timestamp.UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ssZ') -ne '2026-10-13T07:15:00Z') {
             throw 'Published exporter produced unexpected JSON output'
           }
       - name: Package Windows ZIP
@@ -95,6 +102,6 @@ jobs:
           if ($LASTEXITCODE -eq 0) {
             gh release upload $env:RELEASE_TAG artifacts/windows/EventLogExporter-win-x64.zip --clobber
           } else {
-            gh release create $env:RELEASE_TAG artifacts/windows/EventLogExporter-win-x64.zip --verify-tag --title "EventLogExporter $env:RELEASE_TAG" --notes 'Compact Windows x64 ZIP without bundled runtime. Requires installed Microsoft.NETCore.App 5.0.17 x64. Extract the entire archive, configure appsettings.json and run EventLogExporter.exe. See RUN-WINDOWS.md inside the archive.'
+            gh release create $env:RELEASE_TAG artifacts/windows/EventLogExporter-win-x64.zip --verify-tag --title "EventLogExporter $env:RELEASE_TAG" --notes 'One JSON Lines file per source LGP. Set JsonFile:Folder instead of JsonFile:Path; use a fresh output directory when upgrading from the single-file version. Compact Windows x64 ZIP without bundled runtime; requires Microsoft.NETCore.App 5.0.17 x64. Extract the entire archive, configure appsettings.json and run EventLogExporter.exe. See RUN-WINDOWS.md inside the archive.'
           }
           if ($LASTEXITCODE -ne 0) { throw 'GitHub release publication failed' }

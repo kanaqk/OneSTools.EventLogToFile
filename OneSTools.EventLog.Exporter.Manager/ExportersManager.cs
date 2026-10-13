@@ -257,7 +257,7 @@ namespace OneSTools.EventLog.Exporter.Manager
                     using var hash = SHA256.Create();
                     var id = BitConverter.ToString(hash.ComputeHash(
                         Encoding.UTF8.GetBytes(Path.GetFullPath(sourcePath)))).Replace("-", "").ToLowerInvariant();
-                    return new JsonFileStorage(Path.Combine(_jsonFileFolder, id, "events.jsonl"));
+                    return new JsonFileStorage(Path.Combine(_jsonFileFolder, id));
                 }
                 case StorageType.ClickHouse:
                     {

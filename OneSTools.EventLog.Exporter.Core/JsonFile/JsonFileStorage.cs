@@ -9,77 +9,66 @@ using Newtonsoft.Json;
 
 namespace OneSTools.EventLog.Exporter.Core.JsonFile
 {
-    /// <summary>Append-only UTF-8 JSON Lines output. The last complete event is the checkpoint.</summary>
+    /// <summary>One JSON Lines file per source LGP, with an atomic directory checkpoint.</summary>
     public sealed class JsonFileStorage : IEventLogStorage
     {
-        private readonly FileStream _stream;
+        private readonly string _folder;
+        private readonly string _checkpointPath;
+        private readonly FileStream _directoryLock;
+        private JsonLinesFileStorage _current;
+        private string _currentFileName;
         private EventLogPosition _position;
 
         public JsonFileStorage(IConfiguration configuration)
-            : this(configuration.GetValue("JsonFile:Path", ""))
+            : this(configuration.GetValue("JsonFile:Folder", ""))
         {
         }
 
-        public JsonFileStorage(string path)
+        public JsonFileStorage(string folder)
         {
-            if (string.IsNullOrWhiteSpace(path))
-                throw new ArgumentException("JsonFile:Path must specify an output file", nameof(path));
+            if (string.IsNullOrWhiteSpace(folder))
+                throw new ArgumentException("JsonFile:Folder must specify an output directory; JsonFile:Path is no longer used", nameof(folder));
 
-            path = Path.GetFullPath(path);
-            Directory.CreateDirectory(Path.GetDirectoryName(path));
-            // Filebeat can read while we append; another exporter must not write this file.
-            _stream = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read,
-                65536, FileOptions.Asynchronous);
+            _folder = Path.GetFullPath(folder);
+            Directory.CreateDirectory(_folder);
+            _checkpointPath = Path.Combine(_folder, ".position.json");
+            _directoryLock = new FileStream(Path.Combine(_folder, ".export.lock"),
+                FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
             try
             {
-                RecoverPosition();
+                if (File.Exists(_checkpointPath))
+                {
+                    _position = JsonConvert.DeserializeObject<EventLogPosition>(File.ReadAllText(_checkpointPath));
+                    if (_position == null || _position.EndPosition <= 0 || _position.Id <= 0)
+                        throw new InvalidDataException("The output directory checkpoint is invalid");
+                    OpenOutput(_position.FileName, mustExist: true);
+                    var tail = _current.ReadEventLogPositionAsync().GetAwaiter().GetResult();
+                    if (tail == null || tail.FileName != _position.FileName || tail.EndPosition < _position.EndPosition)
+                        throw new InvalidDataException("The checkpoint refers to missing output events");
+                }
             }
             catch
             {
-                _stream.Dispose();
+                Dispose();
                 throw;
             }
         }
 
-        private void RecoverPosition()
+        private void OpenOutput(string sourceFileName, bool mustExist = false)
         {
-            var end = FindPreviousNewline(_stream.Length) + 1;
-            if (end > 0)
-            {
-                var start = FindPreviousNewline(end - 1) + 1;
-                _stream.Position = start;
-                using var reader = new StreamReader(_stream, Encoding.UTF8, false, 4096, true);
-                var item = JsonConvert.DeserializeObject<EventLogItem>(reader.ReadLine());
-                if (item == null || string.IsNullOrEmpty(item.FileName) || item.EndPosition <= 0)
-                    throw new InvalidDataException("The last JSON event has no valid source position");
-                _position = ToPosition(item);
-            }
+            if (string.IsNullOrWhiteSpace(sourceFileName) || sourceFileName.Contains("/") ||
+                sourceFileName.Contains("\\") || Path.GetFileName(sourceFileName) != sourceFileName ||
+                !string.Equals(Path.GetExtension(sourceFileName), ".lgp", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("Event source must be an LGP file name without a directory");
 
-            // An interrupted write may leave an incomplete final line. Replay it from the source.
-            _stream.SetLength(end);
-            _stream.Position = end;
-        }
-
-        private long FindPreviousNewline(long before)
-        {
-            var buffer = new byte[4096];
-            while (before > 0)
-            {
-                var start = Math.Max(0, before - buffer.Length);
-                _stream.Position = start;
-                var length = (int)(before - start);
-                var read = 0;
-                while (read < length)
-                {
-                    var count = _stream.Read(buffer, read, length - read);
-                    if (count == 0) throw new EndOfStreamException();
-                    read += count;
-                }
-                for (var i = length - 1; i >= 0; i--)
-                    if (buffer[i] == (byte)'\n') return start + i;
-                before = start;
-            }
-            return -1;
+            if (_current != null && _currentFileName == sourceFileName) return;
+            var outputPath = Path.Combine(_folder, Path.ChangeExtension(sourceFileName, ".jsonl"));
+            if (mustExist && !File.Exists(outputPath))
+                throw new InvalidDataException("The checkpoint output file is missing: " + outputPath);
+            _current?.Dispose();
+            _current = null;
+            _current = new JsonLinesFileStorage(outputPath);
+            _currentFileName = sourceFileName;
         }
 
         public Task<EventLogPosition> ReadEventLogPositionAsync(CancellationToken cancellationToken = default)
@@ -91,22 +80,41 @@ namespace OneSTools.EventLog.Exporter.Core.JsonFile
         public async Task WriteEventLogDataAsync(List<EventLogItem> entities,
             CancellationToken cancellationToken = default)
         {
-            if (entities.Count == 0) return;
-            foreach (var item in entities)
+            var start = 0;
+            while (start < entities.Count)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var bytes = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(item, Formatting.None));
-                await _stream.WriteAsync(bytes, 0, bytes.Length, cancellationToken);
-                _stream.WriteByte((byte)'\n');
+                var end = start + 1;
+                while (end < entities.Count && entities[end].FileName == entities[start].FileName) end++;
+                OpenOutput(entities[start].FileName);
+                await _current.WriteEventLogDataAsync(entities.GetRange(start, end - start), cancellationToken);
+                var position = await _current.ReadEventLogPositionAsync(cancellationToken);
+                await SavePositionAsync(position, cancellationToken);
+                _position = position;
+                start = end;
             }
-            // Persist output before exposing the new reader position.
-            _stream.Flush(true);
-            _position = ToPosition(entities[entities.Count - 1]);
         }
 
-        private static EventLogPosition ToPosition(EventLogItem item) =>
-            new EventLogPosition(item.FileName, item.EndPosition, item.LgfEndPosition, item.Id);
+        private async Task SavePositionAsync(EventLogPosition position, CancellationToken cancellationToken)
+        {
+            var bytes = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(position));
+            var temporaryPath = _checkpointPath + ".tmp";
+            using (var stream = new FileStream(temporaryPath, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                await stream.WriteAsync(bytes, 0, bytes.Length, cancellationToken);
+                stream.Flush(true);
+            }
+            // The data file has already been flushed. Replace the checkpoint only after that.
+            if (File.Exists(_checkpointPath))
+                File.Replace(temporaryPath, _checkpointPath, null);
+            else
+                File.Move(temporaryPath, _checkpointPath);
+        }
 
-        public void Dispose() => _stream.Dispose();
+        public void Dispose()
+        {
+            _current?.Dispose();
+            _directoryLock?.Dispose();
+        }
     }
 }

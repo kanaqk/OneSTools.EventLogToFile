@@ -2,9 +2,11 @@ filebeat.inputs:
   - type: filestream
     id: ones-eventlog
     enabled: true
+    # Also read small archived LGP conversions (default fingerprint length is 1024 bytes).
+    prospector.scanner.fingerprint.length: 64
     paths:
-      - /var/log/1c/events.jsonl
-      - /var/log/1c/*/events.jsonl
+      - /var/log/1c/*.jsonl
+      - /var/log/1c/*/*.jsonl
     parsers:
       - ndjson:
           target: "ones"
