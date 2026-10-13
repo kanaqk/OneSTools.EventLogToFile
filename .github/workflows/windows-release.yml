@@ -1,0 +1,93 @@
+name: Windows release
+
+on:
+  push:
+    tags: ['v*']
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Test exporter
+        shell: pwsh
+        run: dotnet run --project tests/Exporter.SmokeTests --configuration Release
+      - name: Publish self-contained Windows x64 application
+        shell: pwsh
+        run: >-
+          dotnet publish OneSTools.EventLog.Exporter/OneSTools.EventLog.Exporter.csproj
+          --configuration Release --runtime win-x64 --self-contained true
+          -p:PublishSingleFile=false --output artifacts/windows/EventLogExporter-win-x64
+          -m:1
+      - name: Test published Windows executable
+        shell: pwsh
+        run: |
+          $source = Join-Path $env:RUNNER_TEMP 'eventlog-release-source'
+          New-Item -ItemType Directory -Path $source -Force | Out-Null
+          Set-Content -Path (Join-Path $source '1Cv8.lgf') -Encoding utf8 -Value '{4,"_$Session$_.Start",1}'
+          $record = '{20261013121500,N,{0,0},0,0,0,1,1,I,"Test",0,{U},"",0,0,0,1}'
+          Set-Content -Path (Join-Path $source '20261013000000.lgp') -Encoding utf8 -Value @($record, $record)
+          $output = Join-Path $env:RUNNER_TEMP 'eventlog-release-events.jsonl'
+          $exe = Join-Path $PWD 'artifacts/windows/EventLogExporter-win-x64/EventLogExporter.exe'
+          $arguments = @('--Exporter:StorageType=JsonFile', '--Exporter:LoadArchive=true',
+            '--Exporter:WritingMaxDegreeOfParallelism=1', '--Exporter:TimeZone=Asia/Yekaterinburg',
+            "--Exporter:LogFolder=`"$source`"", "--JsonFile:Path=`"$output`"")
+          $process = Start-Process -FilePath $exe -ArgumentList $arguments -NoNewWindow -PassThru
+          if (-not $process.WaitForExit(30000)) {
+            $process.Kill()
+            throw 'Published exporter did not finish archive conversion'
+          }
+          if ($process.ExitCode -ne 0) { throw "Exporter exit code: $($process.ExitCode)" }
+          $events = @(Get-Content $output | ForEach-Object { $_ | ConvertFrom-Json })
+          $timestamp = [DateTimeOffset]$events[0].DateTime
+          if ($events.Count -ne 2 -or $events[1].Id -ne 2 -or $timestamp.UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ssZ') -ne '2026-10-13T07:15:00Z') {
+            throw 'Published exporter produced unexpected JSON output'
+          }
+      - name: Package Windows ZIP
+        shell: pwsh
+        run: |
+          $publish = 'artifacts/windows/EventLogExporter-win-x64'
+          Remove-Item "$publish/appsettings.Development.json" -ErrorAction SilentlyContinue
+          Copy-Item examples/RUN-WINDOWS.md "$publish/RUN-WINDOWS.md"
+          Copy-Item examples/filebeat.yml "$publish/filebeat.example.yml"
+          Copy-Item LICENSE "$publish/LICENSE"
+          Compress-Archive -Path "$publish/*" -DestinationPath artifacts/windows/EventLogExporter-win-x64.zip -Force
+      - name: Save downloadable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: EventLogExporter-win-x64
+          path: artifacts/windows/EventLogExporter-win-x64.zip
+          if-no-files-found: error
+      - name: Attach ZIP to GitHub release
+        if: github.event_name == 'release'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload $env:RELEASE_TAG artifacts/windows/EventLogExporter-win-x64.zip --clobber
+      - name: Publish tagged release with Windows ZIP
+        if: github.event_name == 'push'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release view $env:RELEASE_TAG --json tagName *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:RELEASE_TAG artifacts/windows/EventLogExporter-win-x64.zip --clobber
+          } else {
+            gh release create $env:RELEASE_TAG artifacts/windows/EventLogExporter-win-x64.zip --verify-tag --title "EventLogExporter $env:RELEASE_TAG" --notes 'Windows x64 ZIP with bundled runtime. Extract the entire archive, configure appsettings.json and run EventLogExporter.exe. See RUN-WINDOWS.md inside the archive.'
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub release publication failed' }
