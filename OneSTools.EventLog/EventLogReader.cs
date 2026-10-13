@@ -64,6 +64,18 @@ namespace OneSTools.EventLog
 
             while (!cancellationToken.IsCancellationRequested)
             {
+                if (_lgpReader == null)
+                {
+                    if (!_settings.LiveMode) return null;
+                    var wait = WaitHandle.WaitAny(
+                        new[] { _lgpChangedCreated, cancellationToken.WaitHandle }, _settings.ReadingTimeout);
+                    _lgpChangedCreated.Reset();
+                    if (wait == WaitHandle.WaitTimeout) throw new EventLogReaderTimeoutException();
+                    if (cancellationToken.IsCancellationRequested) return null;
+                    SetNextLgpReader();
+                    continue;
+                }
+
                 try
                 {
                     item = _lgpReader.ReadNextEventLogItem(cancellationToken);

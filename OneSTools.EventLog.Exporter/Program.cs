@@ -7,6 +7,7 @@ using Microsoft.Extensions.Logging;
 using OneSTools.EventLog.Exporter.Core;
 using OneSTools.EventLog.Exporter.Core.ClickHouse;
 using OneSTools.EventLog.Exporter.Core.ElasticSearch;
+using OneSTools.EventLog.Exporter.Core.JsonFile;
 
 namespace OneSTools.EventLog.Exporter
 {
@@ -38,6 +39,9 @@ namespace OneSTools.EventLog.Exporter
 
                     switch (storageType)
                     {
+                        case StorageType.JsonFile:
+                            services.AddTransient<IEventLogStorage, JsonFileStorage>();
+                            break;
                         case StorageType.ClickHouse:
                             services.AddTransient<IEventLogStorage, ClickHouseStorage>();
                             break;

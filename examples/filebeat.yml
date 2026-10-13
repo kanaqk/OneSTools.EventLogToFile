@@ -1,0 +1,23 @@
+filebeat.inputs:
+  - type: filestream
+    id: ones-eventlog
+    enabled: true
+    paths:
+      - /var/log/1c/events.jsonl
+      - /var/log/1c/*/events.jsonl
+    parsers:
+      - ndjson:
+          target: "ones"
+          add_error_key: true
+
+processors:
+  - timestamp:
+      field: ones.DateTime
+      layouts:
+        - '2006-01-02T15:04:05Z'
+        - '2006-01-02T15:04:05.999999999Z'
+      test:
+        - '2026-10-13T07:15:00Z'
+
+output.elasticsearch:
+  hosts: ["http://localhost:9200"]

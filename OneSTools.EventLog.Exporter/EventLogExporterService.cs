@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -13,11 +14,16 @@ namespace OneSTools.EventLog.Exporter
         private readonly IServiceProvider _serviceProvider;
         private readonly ILogger<EventLogExporterService> _logger;
         private bool _disposedValue;
+        private readonly bool _loadArchive;
+        private readonly IHostApplicationLifetime _lifetime;
 
-        public EventLogExporterService(IServiceProvider serviceProvider, ILogger<EventLogExporterService> logger)
+        public EventLogExporterService(IServiceProvider serviceProvider, ILogger<EventLogExporterService> logger,
+            IConfiguration configuration, IHostApplicationLifetime lifetime)
         {
             _serviceProvider = serviceProvider;
             _logger = logger;
+            _loadArchive = configuration.GetValue("Exporter:LoadArchive", false);
+            _lifetime = lifetime;
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -28,6 +34,11 @@ namespace OneSTools.EventLog.Exporter
                 {
                     using var exporter = _serviceProvider.GetService<EventLogExporter>();
                     await exporter.StartAsync(stoppingToken);
+                    if (_loadArchive)
+                    {
+                        _lifetime.StopApplication();
+                        return;
+                    }
                 }
                 catch (TaskCanceledException)
                 {

@@ -80,6 +80,11 @@ namespace OneSTools.EventLog.Exporter.Core
 
         private void CheckSettings()
         {
+            if (_storage is JsonFile.JsonFileStorage && _writingMaxDop != 1)
+                throw new Exception("JsonFile storage requires WritingMaxDegreeOfParallelism = 1 to preserve source order");
+
+            if (_portion <= 0)
+                throw new Exception("Portion must be greater than 0");
             if (_logFolder == string.Empty)
                 throw new Exception("Event log folder is not specified");
 
@@ -143,15 +148,20 @@ namespace OneSTools.EventLog.Exporter.Core
                     }
                     else if (!settings.LiveMode)
                     {
-                        forceSending = true;
+                        break;
                     }
 
                     if (forceSending)
                         _batchBlock.TriggerBatch();
                 }
             }
-            catch (TaskCanceledException)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
+            }
+            finally
+            {
+                _batchBlock.Complete();
+                await _writeBlock.Completion;
             }
         }
 
@@ -159,14 +169,12 @@ namespace OneSTools.EventLog.Exporter.Core
         {
             var writeBlockSettings = new ExecutionDataflowBlockOptions
             {
-                CancellationToken = cancellationToken,
                 BoundedCapacity = _collectedFactor,
                 MaxDegreeOfParallelism = _writingMaxDop
             };
 
             var batchBlockSettings = new GroupingDataflowBlockOptions
             {
-                CancellationToken = cancellationToken,
                 BoundedCapacity = _portion * _collectedFactor
             };
 
@@ -174,7 +182,8 @@ namespace OneSTools.EventLog.Exporter.Core
             {
                 try
                 {
-                    await _storage.WriteEventLogDataAsync(c.ToList(), cancellationToken);
+                    await _storage.WriteEventLogDataAsync(c.ToList(),
+                        _storage is JsonFile.JsonFileStorage ? CancellationToken.None : cancellationToken);
                 }
                 catch (Exception)
                 {
@@ -227,7 +236,7 @@ namespace OneSTools.EventLog.Exporter.Core
                 else
                 {
                     _logger?.LogInformation(
-                        "There're no log items in the database, first found log file will be read from 0 position");
+                        "There are no exported log items; the first found log file will be read from position 0");
                 }
             }
             else
@@ -243,9 +252,8 @@ namespace OneSTools.EventLog.Exporter.Core
         private static async Task SendAsync(ITargetBlock<EventLogItem> nextBlock, EventLogItem item,
             CancellationToken stoppingToken = default)
         {
-            while (!stoppingToken.IsCancellationRequested && !nextBlock.Completion.IsCompleted)
-                if (await nextBlock.SendAsync(item, stoppingToken))
-                    break;
+            if (!await nextBlock.SendAsync(item, stoppingToken))
+                throw new InvalidOperationException("The export pipeline stopped accepting events");
         }
 
         protected virtual void Dispose(bool disposing)

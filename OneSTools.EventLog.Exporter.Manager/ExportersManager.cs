@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Configuration;
@@ -11,6 +13,7 @@ using NodaTime;
 using OneSTools.EventLog.Exporter.Core;
 using OneSTools.EventLog.Exporter.Core.ClickHouse;
 using OneSTools.EventLog.Exporter.Core.ElasticSearch;
+using OneSTools.EventLog.Exporter.Core.JsonFile;
 
 namespace OneSTools.EventLog.Exporter.Manager
 {
@@ -34,6 +37,8 @@ namespace OneSTools.EventLog.Exporter.Manager
         private readonly int _portion;
         private readonly int _readingTimeout;
         private readonly Dictionary<string, CancellationTokenSource> _runExporters = new();
+        private readonly List<Task> _exporterTasks = new();
+        private CancellationToken _stoppingToken;
         private readonly string _separation;
 
         private readonly IServiceProvider _serviceProvider;
@@ -43,6 +48,7 @@ namespace OneSTools.EventLog.Exporter.Manager
         private readonly DateTimeZone _timeZone = DateTimeZoneProviders.Tzdb.GetSystemDefault();
         private readonly int _writingMaxDop;
         private readonly DateTime _skipEventsBeforeDate;
+        private readonly string _jsonFileFolder;
 
         public ExportersManager(ILogger<ExportersManager> logger, IServiceProvider serviceProvider,
             IConfiguration configuration)
@@ -69,6 +75,13 @@ namespace OneSTools.EventLog.Exporter.Manager
 
             switch (_storageType)
             {
+                case StorageType.JsonFile:
+                    _jsonFileFolder = configuration.GetValue("JsonFile:Folder", "");
+                    if (string.IsNullOrWhiteSpace(_jsonFileFolder))
+                        throw new Exception("JsonFile:Folder must specify the manager output directory");
+                    if (_writingMaxDop != 1)
+                        throw new Exception("JsonFile storage requires WritingMaxDegreeOfParallelism = 1");
+                    break;
                 case StorageType.ClickHouse:
                     {
                         _connectionString = configuration.GetValue("ClickHouse:ConnectionString", "");
@@ -109,6 +122,7 @@ namespace OneSTools.EventLog.Exporter.Manager
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
+            _stoppingToken = stoppingToken;
             stoppingToken.Register(() =>
             {
                 lock (_runExporters)
@@ -132,6 +146,15 @@ namespace OneSTools.EventLog.Exporter.Manager
             }
 
             await Task.Factory.StartNew(stoppingToken.WaitHandle.WaitOne, stoppingToken);
+            Task[] tasks;
+            lock (_runExporters) tasks = _exporterTasks.ToArray();
+            try
+            {
+                await Task.WhenAll(tasks);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+            }
         }
 
         private void ClstWatcher_InfoBasesDeleted(object sender, ClstEventArgs args)
@@ -157,9 +180,10 @@ namespace OneSTools.EventLog.Exporter.Manager
             {
                 lock (_runExporters)
                 {
+                    if (_stoppingToken.IsCancellationRequested) return;
                     if (!_runExporters.ContainsKey(path))
                     {
-                        var cts = new CancellationTokenSource();
+                        var cts = CancellationTokenSource.CreateLinkedTokenSource(_stoppingToken);
                         var logger =
                             (ILogger<EventLogExporter>)_serviceProvider.GetService(typeof(ILogger<EventLogExporter>));
 
@@ -175,15 +199,16 @@ namespace OneSTools.EventLog.Exporter.Manager
                             SkipEventsBeforeDate = _skipEventsBeforeDate
                         };
 
-                        Task.Factory.StartNew(async () =>
+                        var task = Task.Run(async () =>
                         {
                             while (!cts.Token.IsCancellationRequested)
                             {
                                 try
                                 {
-                                    using var storage = GetStorage(dataBaseName);
+                                    using var storage = GetStorage(dataBaseName, path);
                                     using var exporter = new EventLogExporter(settings, storage, logger);
                                     await exporter.StartAsync(cts.Token);
+                                    if (_loadArchive) break;
                                 }
                                 catch (TaskCanceledException)
                                 {
@@ -192,9 +217,10 @@ namespace OneSTools.EventLog.Exporter.Manager
                                 {
                                     _logger?.LogCritical(ex, "Failed to execute EventLogExporter");
                                 }
-                                await Task.Delay(5000);
+                                await Task.Delay(5000, cts.Token);
                             }
                         }, cts.Token);
+                        _exporterTasks.Add(task);
                         _runExporters.Add(path, cts);
 
                         _logger?.LogInformation(
@@ -221,10 +247,18 @@ namespace OneSTools.EventLog.Exporter.Manager
             }
         }
 
-        private IEventLogStorage GetStorage(string dataBaseName)
+        private IEventLogStorage GetStorage(string dataBaseName, string sourcePath)
         {
             switch (_storageType)
             {
+                case StorageType.JsonFile:
+                {
+                    // Separate cluster/database paths even when templates produce the same name.
+                    using var hash = SHA256.Create();
+                    var id = BitConverter.ToString(hash.ComputeHash(
+                        Encoding.UTF8.GetBytes(Path.GetFullPath(sourcePath)))).Replace("-", "").ToLowerInvariant();
+                    return new JsonFileStorage(Path.Combine(_jsonFileFolder, id, "events.jsonl"));
+                }
                 case StorageType.ClickHouse:
                     {
                         var logger =

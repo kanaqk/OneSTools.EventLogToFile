@@ -4,6 +4,7 @@
     {
         None = 0,
         ClickHouse,
-        ElasticSearch
+        ElasticSearch,
+        JsonFile
     }
 }
