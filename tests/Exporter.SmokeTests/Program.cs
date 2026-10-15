@@ -182,6 +182,7 @@ try
     using (var exporter = new EventLogExporter(settings, storage))
         await exporter.StartAsync().WaitAsync(TimeSpan.FromSeconds(10));
     Check(Directory.GetFiles(emptyOutput, "*.jsonl").Length == 0, "empty archive completes without creating JSON files");
+    await ManagerSmokeTests.RunAsync(root, record);
     Console.WriteLine("All exporter smoke tests passed.");
 }
 finally

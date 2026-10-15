@@ -18,14 +18,20 @@ namespace OneSTools.EventLog.Exporter.Core.JsonFile
         private JsonLinesFileStorage _current;
         private string _currentFileName;
         private EventLogPosition _position;
+        private readonly string _infoBaseName;
 
         public JsonFileStorage(IConfiguration configuration)
             : this(configuration.GetValue("JsonFile:Folder", ""))
         {
         }
 
-        public JsonFileStorage(string folder)
+        public JsonFileStorage(string folder) : this(folder, null)
         {
+        }
+
+        public JsonFileStorage(string folder, string infoBaseName)
+        {
+            _infoBaseName = infoBaseName;
             if (string.IsNullOrWhiteSpace(folder))
                 throw new ArgumentException("JsonFile:Folder must specify an output directory; JsonFile:Path is no longer used", nameof(folder));
 
@@ -67,7 +73,7 @@ namespace OneSTools.EventLog.Exporter.Core.JsonFile
                 throw new InvalidDataException("The checkpoint output file is missing: " + outputPath);
             _current?.Dispose();
             _current = null;
-            _current = new JsonLinesFileStorage(outputPath);
+            _current = new JsonLinesFileStorage(outputPath, _infoBaseName);
             _currentFileName = sourceFileName;
         }
 

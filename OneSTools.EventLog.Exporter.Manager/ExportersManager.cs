@@ -38,6 +38,7 @@ namespace OneSTools.EventLog.Exporter.Manager
         private readonly int _readingTimeout;
         private readonly Dictionary<string, CancellationTokenSource> _runExporters = new();
         private readonly List<Task> _exporterTasks = new();
+        private readonly Dictionary<string, Task> _lastExporterTasks = new();
         private CancellationToken _stoppingToken;
         private readonly string _separation;
 
@@ -135,6 +136,8 @@ namespace OneSTools.EventLog.Exporter.Manager
             foreach (var clstFolder in _clstFolders)
             {
                 var clstWatcher = new ClstWatcher(clstFolder.Folder, clstFolder.Templates);
+                clstWatcher.ReadFailed += ex => _logger?.LogWarning(ex,
+                    "Failed to read cluster registry in {Folder}; will retry", clstFolder.Folder);
 
                 foreach (var (key, (name, dataBaseName)) in clstWatcher.InfoBases)
                     StartExporter(key, name, dataBaseName);
@@ -199,13 +202,20 @@ namespace OneSTools.EventLog.Exporter.Manager
                             SkipEventsBeforeDate = _skipEventsBeforeDate
                         };
 
+                        _lastExporterTasks.TryGetValue(path, out var previousTask);
                         var task = Task.Run(async () =>
                         {
+                            // A renamed/reconnected base must wait for its previous writer to release the folder.
+                            if (previousTask != null)
+                            {
+                                try { await previousTask; }
+                                catch (OperationCanceledException) { }
+                            }
                             while (!cts.Token.IsCancellationRequested)
                             {
                                 try
                                 {
-                                    using var storage = GetStorage(dataBaseName, path);
+                                    using var storage = GetStorage(name, dataBaseName, path);
                                     using var exporter = new EventLogExporter(settings, storage, logger);
                                     await exporter.StartAsync(cts.Token);
                                     if (_loadArchive) break;
@@ -221,6 +231,7 @@ namespace OneSTools.EventLog.Exporter.Manager
                             }
                         }, cts.Token);
                         _exporterTasks.Add(task);
+                        _lastExporterTasks[path] = task;
                         _runExporters.Add(path, cts);
 
                         _logger?.LogInformation(
@@ -242,12 +253,13 @@ namespace OneSTools.EventLog.Exporter.Manager
                 if (_runExporters.TryGetValue(id, out var cts))
                 {
                     cts.Cancel();
+                    _runExporters.Remove(id);
                     _logger?.LogInformation($"Event log exporter for \"{name}\" information base is stopped");
                 }
             }
         }
 
-        private IEventLogStorage GetStorage(string dataBaseName, string sourcePath)
+        private IEventLogStorage GetStorage(string infoBaseName, string dataBaseName, string sourcePath)
         {
             switch (_storageType)
             {
@@ -257,7 +269,7 @@ namespace OneSTools.EventLog.Exporter.Manager
                     using var hash = SHA256.Create();
                     var id = BitConverter.ToString(hash.ComputeHash(
                         Encoding.UTF8.GetBytes(Path.GetFullPath(sourcePath)))).Replace("-", "").ToLowerInvariant();
-                    return new JsonFileStorage(Path.Combine(_jsonFileFolder, id));
+                    return new JsonFileStorage(Path.Combine(_jsonFileFolder, id), infoBaseName);
                 }
                 case StorageType.ClickHouse:
                     {

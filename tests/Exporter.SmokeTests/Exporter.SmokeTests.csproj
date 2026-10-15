@@ -6,5 +6,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../OneSTools.EventLog.Exporter.Core/OneSTools.EventLog.Exporter.Core.csproj" />
+    <ProjectReference Include="../../OneSTools.EventLog.Exporter.Manager/OneSTools.EventLog.Exporter.Manager.csproj" />
   </ItemGroup>
 </Project>

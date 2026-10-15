@@ -5,6 +5,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 
 namespace OneSTools.EventLog.Exporter.Core.JsonFile
 {
@@ -13,9 +14,11 @@ namespace OneSTools.EventLog.Exporter.Core.JsonFile
     {
         private readonly FileStream _stream;
         private EventLogPosition _position;
+        private readonly string _infoBaseName;
 
-        public JsonLinesFileStorage(string path)
+        public JsonLinesFileStorage(string path, string infoBaseName = null)
         {
+            _infoBaseName = infoBaseName;
             if (string.IsNullOrWhiteSpace(path))
                 throw new ArgumentException("Output path must specify a JSON Lines file", nameof(path));
 
@@ -89,7 +92,18 @@ namespace OneSTools.EventLog.Exporter.Core.JsonFile
             foreach (var item in entities)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var bytes = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(item, Formatting.None));
+                string json;
+                if (_infoBaseName != null)
+                {
+                    var document = JObject.FromObject(item);
+                    document["IBName"] = _infoBaseName;
+                    json = document.ToString(Formatting.None);
+                }
+                else
+                {
+                    json = JsonConvert.SerializeObject(item, Formatting.None);
+                }
+                var bytes = Encoding.UTF8.GetBytes(json);
                 await _stream.WriteAsync(bytes, 0, bytes.Length, cancellationToken);
                 _stream.WriteByte((byte)'\n');
             }

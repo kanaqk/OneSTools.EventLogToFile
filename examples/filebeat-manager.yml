@@ -1,0 +1,23 @@
+filebeat.inputs:
+  - type: filestream
+    id: ones-all-bases
+    enabled: true
+    paths:
+      - 'D:/Logs/1C-All/*/*.jsonl'
+    # Different bases can have identical first bytes. Their output paths are unique and stable.
+    file_identity.path: ~
+    prospector.scanner.fingerprint.enabled: false
+    parsers:
+      - ndjson:
+          target: "ones"
+          add_error_key: true
+
+processors:
+  - timestamp:
+      field: ones.DateTime
+      layouts:
+        - '2006-01-02T15:04:05Z'
+        - '2006-01-02T15:04:05.999999999Z'
+
+output.logstash:
+  hosts: ['localhost:5044']

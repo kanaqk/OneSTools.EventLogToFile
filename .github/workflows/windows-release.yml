@@ -33,6 +33,13 @@ jobs:
           --configuration Release --runtime win-x64 --self-contained false
           -p:PublishSingleFile=false --output artifacts/windows/EventLogExporter-win-x64
           -m:1
+      - name: Publish compact Windows x64 manager
+        shell: pwsh
+        run: >-
+          dotnet publish OneSTools.EventLog.Exporter.Manager/OneSTools.EventLog.Exporter.Manager.csproj
+          --configuration Release --runtime win-x64 --self-contained false
+          -p:PublishSingleFile=false --output artifacts/windows/EventLogExportersManager-win-x64
+          -m:1
       - name: Test published Windows executable
         shell: pwsh
         run: |
@@ -64,25 +71,63 @@ jobs:
           if ($events.Count -ne 3 -or $events[2].Id -ne 3 -or $timestamp.UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ssZ') -ne '2026-10-13T07:15:00Z') {
             throw 'Published exporter produced unexpected JSON output'
           }
+      - name: Test published Windows manager
+        shell: pwsh
+        run: |
+          $cluster = Join-Path $env:RUNNER_TEMP 'eventlog-manager-cluster'
+          $logs = Join-Path $cluster 'base-1/1Cv8Log'
+          New-Item -ItemType Directory -Path $logs -Force | Out-Null
+          Copy-Item (Join-Path $env:RUNNER_TEMP 'eventlog-release-source/*') $logs
+          Set-Content -Path (Join-Path $cluster '1CV8Clst.lst') -Encoding utf8 -Value '{0,0,{1,{"base-1",0,0,0,0,"Accounting"}}}'
+          $output = Join-Path $env:RUNNER_TEMP 'eventlog-manager-output'
+          $exe = Join-Path $PWD 'artifacts/windows/EventLogExportersManager-win-x64/EventLogExportersManager.exe'
+          $arguments = @('--Exporter:StorageType=JsonFile', '--Exporter:LoadArchive=false',
+            '--Exporter:WritingMaxDegreeOfParallelism=1', '--Exporter:TimeZone=Asia/Yekaterinburg',
+            "--Manager:ClstFolders:0:Folder=`"$cluster`"", '--Manager:ClstFolders:0:Templates:0:Mask=.*',
+            '--Manager:ClstFolders:0:Templates:0:Template=[IBNAME]', "--JsonFile:Folder=`"$output`"")
+          $process = Start-Process -FilePath $exe -ArgumentList $arguments -NoNewWindow -PassThru
+          try {
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            while ($true) {
+              if ($process.HasExited) { throw 'Published manager exited before exporting events' }
+              if ((Test-Path $output) -and @(Get-ChildItem $output -Recurse -Force -Filter '.position.json').Count -gt 0) { break }
+              if ([DateTime]::UtcNow -gt $deadline) { throw 'Published manager did not export events' }
+              Start-Sleep -Milliseconds 100
+            }
+            Start-Sleep -Seconds 1
+          } finally {
+            if (-not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
+          }
+          $files = @(Get-ChildItem $output -Recurse -Filter '*.jsonl')
+          $events = @($files | ForEach-Object { Get-Content $_.FullName } | ForEach-Object { $_ | ConvertFrom-Json })
+          if ($files.Count -ne 2 -or $events.Count -ne 3 -or @($events | Where-Object { $_.IBName -ne 'Accounting' }).Count -gt 0) {
+            throw 'Published manager must export every event with the registered IBName'
+          }
+          $checkpoint = Get-ChildItem $output -Recurse -Force -Filter '.position.json' | Get-Content -Raw | ConvertFrom-Json
+          if ($checkpoint.Id -ne 3) { throw 'Manager did not persist the final reader position' }
       - name: Package Windows ZIP
         shell: pwsh
         run: |
-          $publish = 'artifacts/windows/EventLogExporter-win-x64'
-          if (Test-Path "$publish/coreclr.dll") { throw 'Runtime must not be included in the compact ZIP' }
-          $config = Get-Content "$publish/EventLogExporter.runtimeconfig.json" -Raw | ConvertFrom-Json
-          if ($config.runtimeOptions.framework.name -ne 'Microsoft.NETCore.App') {
-            throw 'Compact application must use the installed .NET runtime'
+          foreach ($app in @('EventLogExporter', 'EventLogExportersManager')) {
+            $publish = "artifacts/windows/$app-win-x64"
+            if (Test-Path "$publish/coreclr.dll") { throw 'Runtime must not be included in the compact ZIP' }
+            $config = Get-Content "$publish/$app.runtimeconfig.json" -Raw | ConvertFrom-Json
+            if ($config.runtimeOptions.framework.name -ne 'Microsoft.NETCore.App') {
+              throw 'Compact application must use the installed .NET runtime'
+            }
+            Remove-Item "$publish/appsettings.Development.json" -ErrorAction SilentlyContinue
+            $guide = if ($app -eq 'EventLogExportersManager') { 'RUN-MANAGER.md' } else { 'RUN-WINDOWS.md' }
+            Copy-Item "examples/$guide" "$publish/$guide"
+            $beatConfig = if ($app -eq 'EventLogExportersManager') { 'filebeat-manager.yml' } else { 'filebeat.yml' }
+            Copy-Item "examples/$beatConfig" "$publish/filebeat.example.yml"
+            Copy-Item LICENSE "$publish/LICENSE"
+            Compress-Archive -Path "$publish/*" -DestinationPath "artifacts/windows/$app-win-x64.zip" -Force
           }
-          Remove-Item "$publish/appsettings.Development.json" -ErrorAction SilentlyContinue
-          Copy-Item examples/RUN-WINDOWS.md "$publish/RUN-WINDOWS.md"
-          Copy-Item examples/filebeat.yml "$publish/filebeat.example.yml"
-          Copy-Item LICENSE "$publish/LICENSE"
-          Compress-Archive -Path "$publish/*" -DestinationPath artifacts/windows/EventLogExporter-win-x64.zip -Force
       - name: Save downloadable build
         uses: actions/upload-artifact@v4
         with:
-          name: EventLogExporter-win-x64
-          path: artifacts/windows/EventLogExporter-win-x64.zip
+          name: Windows-win-x64
+          path: artifacts/windows/*.zip
           if-no-files-found: error
       - name: Attach ZIP to GitHub release
         if: github.event_name == 'release'
@@ -90,7 +135,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload $env:RELEASE_TAG artifacts/windows/EventLogExporter-win-x64.zip --clobber
+        run: |
+          $archives = @(Get-ChildItem artifacts/windows -Filter '*.zip' | ForEach-Object { $_.FullName })
+          gh release upload $env:RELEASE_TAG @archives --clobber
       - name: Publish tagged release with Windows ZIP
         if: github.event_name == 'push'
         shell: pwsh
@@ -98,10 +145,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
+          $archives = @(Get-ChildItem artifacts/windows -Filter '*.zip' | ForEach-Object { $_.FullName })
           gh release view $env:RELEASE_TAG --json tagName *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $env:RELEASE_TAG artifacts/windows/EventLogExporter-win-x64.zip --clobber
+            gh release upload $env:RELEASE_TAG @archives --clobber
           } else {
-            gh release create $env:RELEASE_TAG artifacts/windows/EventLogExporter-win-x64.zip --verify-tag --title "EventLogExporter $env:RELEASE_TAG" --notes 'One JSON Lines file per source LGP. Set JsonFile:Folder instead of JsonFile:Path; use a fresh output directory when upgrading from the single-file version. Compact Windows x64 ZIP without bundled runtime; requires Microsoft.NETCore.App 5.0.17 x64. Extract the entire archive, configure appsettings.json and run EventLogExporter.exe. See RUN-WINDOWS.md inside the archive.'
+            gh release create $env:RELEASE_TAG @archives --verify-tag --title "EventLogExporter $env:RELEASE_TAG" --notes 'Includes separate exporter and multi-base manager ZIPs. Manager enriches every JSON event with IBName from 1CV8Clst.lst. Configure Manager:ClstFolders and JsonFile:Folder; see RUN-MANAGER.md. One JSON Lines file per source LGP. Set JsonFile:Folder instead of JsonFile:Path; use a fresh output directory when upgrading from the single-file version. Compact Windows x64 ZIP without bundled runtime; requires Microsoft.NETCore.App 5.0.17 x64. Extract the entire archive, configure appsettings.json and run EventLogExporter.exe. See RUN-WINDOWS.md inside the archive.'
           }
           if ($LASTEXITCODE -ne 0) { throw 'GitHub release publication failed' }
