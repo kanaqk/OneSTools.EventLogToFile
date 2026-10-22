@@ -94,6 +94,7 @@ jobs:
           $output = Join-Path $env:RUNNER_TEMP 'eventlog-manager-output'
           $exe = Join-Path $PWD 'artifacts/windows/EventLogExportersManager-win-x64/EventLogExportersManager.exe'
           $arguments = @('--Exporter:StorageType=JsonFile', '--Exporter:LoadArchive=false',
+            '--JsonFile:ProtectCheckpointFile=true',
             '--Exporter:WritingMaxDegreeOfParallelism=1', '--Exporter:TimeZone=Asia/Yekaterinburg',
             "--Manager:ClstFolders:0:Folder=`"$cluster`"", '--Manager:ClstFolders:0:Templates:0:Mask=.*',
             '--Manager:ClstFolders:0:Templates:0:Template=[IBNAME]', "--JsonFile:Folder=`"$output`"")
