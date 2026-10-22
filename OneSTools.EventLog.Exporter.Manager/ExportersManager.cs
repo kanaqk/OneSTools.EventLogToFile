@@ -50,6 +50,7 @@ namespace OneSTools.EventLog.Exporter.Manager
         private readonly int _writingMaxDop;
         private readonly DateTime _skipEventsBeforeDate;
         private readonly string _jsonFileFolder;
+        private readonly bool _protectCheckpointFile;
 
         public ExportersManager(ILogger<ExportersManager> logger, IServiceProvider serviceProvider,
             IConfiguration configuration)
@@ -78,6 +79,7 @@ namespace OneSTools.EventLog.Exporter.Manager
             {
                 case StorageType.JsonFile:
                     _jsonFileFolder = configuration.GetValue("JsonFile:Folder", "");
+                    _protectCheckpointFile = configuration.GetValue("JsonFile:ProtectCheckpointFile", false);
                     if (string.IsNullOrWhiteSpace(_jsonFileFolder))
                         throw new Exception("JsonFile:Folder must specify the manager output directory");
                     if (_writingMaxDop != 1)
@@ -269,7 +271,7 @@ namespace OneSTools.EventLog.Exporter.Manager
                     using var hash = SHA256.Create();
                     var id = BitConverter.ToString(hash.ComputeHash(
                         Encoding.UTF8.GetBytes(Path.GetFullPath(sourcePath)))).Replace("-", "").ToLowerInvariant();
-                    return new JsonFileStorage(Path.Combine(_jsonFileFolder, id), infoBaseName);
+                    return new JsonFileStorage(Path.Combine(_jsonFileFolder, id), infoBaseName, _protectCheckpointFile);
                 }
                 case StorageType.ClickHouse:
                     {

@@ -7,6 +7,13 @@ filebeat.inputs:
     # Different bases can have identical first bytes. Their output paths are unique and stable.
     file_identity.path: ~
     prospector.scanner.fingerprint.enabled: false
+    # Enable only after upgrading Manager and setting JsonFile:ProtectCheckpointFile=true.
+    # Requires a Filebeat version supporting filestream deletion (tested with 9.5.5).
+    # With output.logstash, acknowledgement means accepted by Logstash, not indexed in OpenSearch.
+    # Configure Logstash persistent queues before enabling deletion.
+    # close.on_state_change.inactive: 5m
+    # delete.enabled: true
+    # delete.grace_period: 10m
     parsers:
       - ndjson:
           target: "ones"

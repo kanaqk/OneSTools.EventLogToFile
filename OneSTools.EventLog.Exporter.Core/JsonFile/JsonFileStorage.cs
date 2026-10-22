@@ -19,9 +19,11 @@ namespace OneSTools.EventLog.Exporter.Core.JsonFile
         private string _currentFileName;
         private EventLogPosition _position;
         private readonly string _infoBaseName;
+        private readonly CheckpointFileProtection _protection;
 
         public JsonFileStorage(IConfiguration configuration)
-            : this(configuration.GetValue("JsonFile:Folder", ""))
+            : this(configuration.GetValue("JsonFile:Folder", ""), null,
+                configuration.GetValue("JsonFile:ProtectCheckpointFile", false))
         {
         }
 
@@ -29,7 +31,7 @@ namespace OneSTools.EventLog.Exporter.Core.JsonFile
         {
         }
 
-        public JsonFileStorage(string folder, string infoBaseName)
+        public JsonFileStorage(string folder, string infoBaseName, bool protectCheckpointFile = false)
         {
             _infoBaseName = infoBaseName;
             if (string.IsNullOrWhiteSpace(folder))
@@ -42,6 +44,7 @@ namespace OneSTools.EventLog.Exporter.Core.JsonFile
                 FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
             try
             {
+                if (protectCheckpointFile) _protection = new CheckpointFileProtection(_folder);
                 if (File.Exists(_checkpointPath))
                 {
                     _position = JsonConvert.DeserializeObject<EventLogPosition>(File.ReadAllText(_checkpointPath));
@@ -51,6 +54,7 @@ namespace OneSTools.EventLog.Exporter.Core.JsonFile
                     var tail = _current.ReadEventLogPositionAsync().GetAwaiter().GetResult();
                     if (tail == null || tail.FileName != _position.FileName || tail.EndPosition < _position.EndPosition)
                         throw new InvalidDataException("The checkpoint refers to missing output events");
+                    _protection?.ReleaseExcept(CurrentOutputPath);
                 }
             }
             catch
@@ -59,6 +63,8 @@ namespace OneSTools.EventLog.Exporter.Core.JsonFile
                 throw;
             }
         }
+
+        private string CurrentOutputPath => Path.Combine(_folder, Path.ChangeExtension(_currentFileName, ".jsonl"));
 
         private void OpenOutput(string sourceFileName, bool mustExist = false)
         {
@@ -73,8 +79,19 @@ namespace OneSTools.EventLog.Exporter.Core.JsonFile
                 throw new InvalidDataException("The checkpoint output file is missing: " + outputPath);
             _current?.Dispose();
             _current = null;
-            _current = new JsonLinesFileStorage(outputPath, _infoBaseName);
-            _currentFileName = sourceFileName;
+            var next = new JsonLinesFileStorage(outputPath, _infoBaseName);
+            try
+            {
+                // The open handle blocks deletion until the persistent ACL has been installed.
+                _protection?.Protect(outputPath);
+                _current = next;
+                _currentFileName = sourceFileName;
+            }
+            catch
+            {
+                next.Dispose();
+                throw;
+            }
         }
 
         public Task<EventLogPosition> ReadEventLogPositionAsync(CancellationToken cancellationToken = default)
@@ -97,6 +114,8 @@ namespace OneSTools.EventLog.Exporter.Core.JsonFile
                 var position = await _current.ReadEventLogPositionAsync(cancellationToken);
                 await SavePositionAsync(position, cancellationToken);
                 _position = position;
+                // Never release the old checkpoint file before the new checkpoint is durable.
+                _protection?.ReleaseExcept(CurrentOutputPath);
                 start = end;
             }
         }

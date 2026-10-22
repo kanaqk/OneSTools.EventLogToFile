@@ -5,6 +5,13 @@ using OneSTools.EventLog;
 using OneSTools.EventLog.Exporter.Core;
 using OneSTools.EventLog.Exporter.Core.JsonFile;
 
+if (args.Length == 2 && args[0] == "--try-delete")
+{
+    try { File.Delete(args[1]); return 0; }
+    catch (UnauthorizedAccessException) { return 2; }
+    catch (IOException) { return 3; }
+}
+
 var root = Path.Combine(Path.GetTempPath(), "eventlog-tests-" + Guid.NewGuid());
 Directory.CreateDirectory(root);
 try
@@ -183,6 +190,7 @@ try
         await exporter.StartAsync().WaitAsync(TimeSpan.FromSeconds(10));
     Check(Directory.GetFiles(emptyOutput, "*.jsonl").Length == 0, "empty archive completes without creating JSON files");
     await ManagerSmokeTests.RunAsync(root, record);
+    await CheckpointProtectionSmokeTests.RunAsync(root);
     Console.WriteLine("All exporter smoke tests passed.");
 }
 finally
@@ -214,6 +222,8 @@ static async Task ExpectThrows<T>(Func<Task> action) where T : Exception
     catch (T) { return; }
     throw new Exception("Expected " + typeof(T).Name);
 }
+
+return 0;
 
 sealed class FailingStorage : IEventLogStorage
 {
